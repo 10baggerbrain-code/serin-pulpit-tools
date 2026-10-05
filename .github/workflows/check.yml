@@ -1,0 +1,84 @@
+# 형식 검사: 푸시·풀 리퀘스트마다 두 템플릿의 SKILL.md와 시험 파일을 확인합니다 (비용 없음)
+# 시험 실행: Actions 탭 → "설교 도구 점검" → Run workflow 에서 템플릿과 엔진을 골라 수동 실행
+#   ollama    : 러너에 로컬 모델을 설치해 실행 (무료, CPU라 느림)
+#   anthropic : 저장소 Settings → Secrets 에 ANTHROPIC_API_KEY 등록 필요 (사용량만큼 과금)
+#   openai    : 저장소 Settings → Secrets 에 OPENAI_API_KEY 등록 필요 (사용량만큼 과금)
+name: 설교 도구 점검
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      skill:
+        description: '시험할 템플릿'
+        type: choice
+        options: [theo-atlas, history-pulpit]
+        default: theo-atlas
+      engine:
+        description: '시험 엔진 (ollama / anthropic / openai)'
+        type: choice
+        options: [ollama, anthropic, openai]
+        default: ollama
+      model:
+        description: '모델 이름 (비우면 엔진 기본값)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: SKILL.md 형식 검사
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        skill: [theo-atlas, history-pulpit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node .eval/lint-skill.mjs .
+        working-directory: ${{ matrix.skill }}
+
+  eval:
+    name: 시험 실행
+    if: github.event_name == 'workflow_dispatch'
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        working-directory: ${{ inputs.skill }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Ollama 설치와 모델 내려받기
+        if: inputs.engine == 'ollama'
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          (ollama serve > /tmp/ollama.log 2>&1 &)
+          for i in $(seq 1 30); do curl -s http://127.0.0.1:11434/api/tags > /dev/null && break; sleep 2; done
+          ollama pull "${MODEL:-qwen3:4b}"
+        env:
+          MODEL: ${{ inputs.model }}
+      - name: 시험 실행
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ENGINE: ${{ inputs.engine }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          ARGS="--engine $ENGINE --out eval-output"
+          if [ -n "$MODEL" ]; then ARGS="$ARGS --model $MODEL"; fi
+          node .eval/run.ts evals/cases.json $ARGS
+      - name: 결과 올리기
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-result-${{ inputs.skill }}
+          path: ${{ inputs.skill }}/eval-output/
